@@ -1,38 +1,33 @@
 """
-Script : Alibaba Kitchen Tools Scraper (All Pages) — Styled Version
+Script : Alibaba Kitchen Tools Scraper (All Pages) — Styled & Cleaned Version
 Target : https://www.alibaba.com — Search: "ادوات مطبخ" (Kitchen Tools)
 Output : alibaba_kitchen_tools.xlsx
-
-Note   : Alibaba protection قوية — إذا ظهر Captcha سيتوقف المتصفح لحلّه يدوياً
-         (لهذا HEADLESS = False افتراضياً). غيّره إلى True فقط للتجربة السريعة.
 """
 
 import asyncio
-
 import pandas as pd
 from playwright.async_api import async_playwright
-
+import re
 
 # ==========================================
 # Global settings
 # ==========================================
-HEADLESS = False                     # Alibaba حمايته قوية — الأفضل متصفح ظاهر لحل الكابتشا
-MAX_PAGES = None                     # None = جميع الصفحات تلقائياً | وضع رقم لتحديد حد أقصى
-PAGE_DELAY = 3                       # استراحة بين الصفحات (ثواني)
-NAV_TIMEOUT = 60000                  # مهلة تحميل الصفحة
-CARD_WAIT = 30000                    # مهلة انتظار بطاقات المنتجات
-CAPTCHA_WAIT = 120000                # مهلة حل الكابتشا يدوياً (ثانيتان)
-SCROLL_STEP = 400                    # خطوة التمرير (بكسل)
+HEADLESS = False                     
+MAX_PAGES = None                     
+PAGE_DELAY = 3                       
+NAV_TIMEOUT = 60000                  
+CARD_WAIT = 30000                    
+CAPTCHA_WAIT = 120000                
+SCROLL_STEP = 400                    
 
-# روابط البحث: "ادوات مطبخ" مشفّرة في الرابط
 SEARCH_URL = (
     "https://www.alibaba.com/search/page?"
     "SearchScene=proSearch&pro=true"
     "&SearchText=%D8%A7%D8%AF%D9%88%D8%A7%D8%AA+%D9%85%D8%B7%D8%A8%D8%AE"
 )
 
-# المحّددات الأساسية المستخرجة من DevTools
 PRODUCT_LINK_SELECTOR = "a.searchx-product-e-slider__link[href*='/product-detail/']"
+
 PAGINATION_NUMBERS_JS = r"""
     () => {
         const nums = [];
@@ -51,18 +46,16 @@ PAGINATION_NUMBERS_JS = r"""
 all_products = []
 seen_urls = set()
 
-
 # ==========================================
-# 1. إطلاق المتصفح بإعدادات مموّهة
+# 1. إطلاق المتصفح
 # ==========================================
 async def launch_browser(p):
     print("🚀 Launching browser (anti-detect mode)...")
-
     browser = await p.chromium.launch(
         headless=HEADLESS,
         args=[
-            "--disable-blink-features=AutomationControlled",  # إخفاء آثار الأتمتة
-            "--use-gl=angle",                                  # محاكاة GPU حقيقي
+            "--disable-blink-features=AutomationControlled",
+            "--use-gl=angle",
             "--disable-dev-shm-usage",
             "--lang=en-US",
         ],
@@ -79,24 +72,18 @@ async def launch_browser(p):
     )
     return browser, context
 
-
 # ==========================================
-# 2. كشف فحص Alibaba الأمني (Captcha)
+# 2. كشف فحص Alibaba الأمني
 # ==========================================
 async def handle_security_check(page):
     content = (await page.content()).lower()
-
     if not any(k in content for k in ["captcha", "robot check", "verify you are", "slide to verify"]):
         return True
-
     print("⚠️ Alibaba security check detected!")
-
     if HEADLESS:
         print("❌ Captcha cannot be solved in headless mode — set HEADLESS = False")
         return False
-
     print("🧩 Please solve the captcha manually in the browser (120s)...")
-
     try:
         await page.wait_for_selector(PRODUCT_LINK_SELECTOR, timeout=CAPTCHA_WAIT)
         print("✅ Security check passed!")
@@ -105,9 +92,8 @@ async def handle_security_check(page):
         print("❌ Captcha was not solved in time.")
         return False
 
-
 # ==========================================
-# 3. تمرير بشري لتحميل المحتوى الكسول (Lazy loading)
+# 3. تمرير بشري
 # ==========================================
 async def human_scroll(page):
     await page.evaluate(
@@ -129,14 +115,12 @@ async def human_scroll(page):
     )
     await page.wait_for_timeout(1000)
 
-
 # ==========================================
-# 4. كشف العدد الكلي للصفحات من شريط الترقيم
+# 4. كشف العدد الكلي للصفحات
 # ==========================================
 async def get_total_pages(page, quiet=False):
     try:
         nums = await page.evaluate(PAGINATION_NUMBERS_JS)
-
         if nums:
             total = max(nums)
             if not quiet:
@@ -144,26 +128,25 @@ async def get_total_pages(page, quiet=False):
             return total
     except Exception as e:
         print(f"⚠️ Could not read pagination: {e}")
-
     return None
 
-
 # ==========================================
-# 5. استخراج بطاقات المنتجات من الصفحة الحالية
+# 5. استخراج بطاقات المنتجات (النسخة المعدلة والنظيفة)
 # ==========================================
 async def extract_products(page, page_num):
     cards = await page.evaluate(
         r"""() => {
             const results = [];
             const links = [...document.querySelectorAll("a.searchx-product-e-slider__link[href*='/product-detail/']")];
-            const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+            
+            // دالة تنظيف قوية
+            const clean = (s) => (s || "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
 
             for (const a of links) {
                 const href = a.href || "";
-                if (!href) continue;
+                if (!href || href.startsWith("javascript:") || href === "#") continue;
 
-                // ── البطاقة الأم: نصعد مستوى مستوى حتى نجد حاوية فيها سعر ──
-                // (أقرب عنصر باسم searchx-product هو حاوية الصورة فقط — لا نعتمد عليه)
+                // البحث عن البطاقة الأم التي تحتوي على السعر
                 let card = null;
                 let node = a.parentElement;
                 for (let i = 0; i < 10 && node; i++) {
@@ -174,34 +157,60 @@ async def extract_products(page, page_num):
 
                 const img = a.querySelector("img") || card.querySelector("img");
 
-                // ── العنوان: عدة مصادر بالترتيب (Lazy loading قد يؤخر img.alt) ──
-                const titleAnchors = [...card.querySelectorAll("a[href*='/product-detail/']")];
-                const titleLink = titleAnchors.find(x => clean(x.textContent).length > 15);
+                // --- 1. استخراج العنوان (Title) ---
                 let title = "";
-                if (img && clean(img.alt).length > 5) title = img.alt;
-                else if (clean(a.getAttribute("aria-label")).length > 5) title = a.getAttribute("aria-label");
-                else if (titleLink) title = titleLink.textContent;
-                else {
-                    const t = card.querySelector("h2, h3, [class*='title'], [class*='subject']");
-                    if (t) title = t.textContent;
+                if (img && clean(img.alt).length > 5) {
+                    title = img.alt;
+                } else {
+                    const titleLink = [...card.querySelectorAll("a[href*='/product-detail/']")].find(x => clean(x.textContent).length > 15 && !x.textContent.includes('$'));
+                    if (titleLink) title = titleLink.textContent;
+                    else {
+                        const t = card.querySelector("h2, h3, [class*='title'], [class*='subject']");
+                        if (t) title = t.textContent;
+                    }
+                }
+                // تنظيف العنوان من أي أرقام أسعار أو MOQ عالقة في نهايته
+                title = clean(title).replace(/\d+\s*(pieces?|sets?|Min\.?\s*order).*$/i, '').trim();
+
+                // --- 2. استخراج السعر (Price) ---
+                let price = "";
+                const priceEls = card.querySelectorAll("[class*='price']");
+                for (let el of priceEls) {
+                    const txt = clean(el.textContent);
+                    if (txt.match(/\$|US\$|EUR|€|£/)) { // التأكد من وجود رمز عملة
+                        price = txt;
+                        break;
+                    }
+                }
+                if (!price && priceEls.length > 0) price = clean(priceEls[0].textContent);
+
+                // --- 3. استخراج المورد (Supplier) ---
+                let supplier = "";
+                const supplierEl = card.querySelector("[class*='company-name'], [class*='supplier-name'], [class*='company']");
+                if (supplierEl) supplier = clean(supplierEl.textContent);
+
+                // --- 4. استخراج الموقع (Location) ---
+                let location = "";
+                const locationEl = card.querySelector("[class*='location'], [class*='country'], [class*='region']");
+                if (locationEl) location = clean(locationEl.textContent);
+
+                // --- 5. استخراج MOQ ---
+                let moq = "";
+                const moqEl = card.querySelector("[class*='moq'], [class*='min-order']");
+                if (moqEl) {
+                    moq = clean(moqEl.textContent);
+                } else {
+                    const cardText = card.innerText || "";
+                    const moqMatch = cardText.match(/(?:MOQ|Min\.?\s*[Oo]rder|Minimum\s+[Oo]rder)[^\d\n]*(\d[\d,]*)/);
+                    if (moqMatch) moq = moqMatch[1];
                 }
 
-                // ── السعر / المورّد / الموقع ──
-                const priceEl = card.querySelector("[class*='price']");
-                const price    = priceEl ? priceEl.textContent : "";
-                const supplier = (card.querySelector("[class*='company'], [class*='supplier']") || {}).textContent || "";
-                const location = (card.querySelector("[class*='location'], [class*='country'], [class*='region']") || {}).textContent || "";
-
-                // ── MOQ من نص البطاقة كاملاً ──
-                const cardText = card.innerText || "";
-                const moqMatch = cardText.match(/(?:MOQ|Min\.?\s*[Oo]rder|Minimum\s+[Oo]rder)[^\d\n]*(\d[\d,]*)/);
-
                 results.push({
-                    title:  clean(title),
-                    price:  clean(price),
-                    moq:    moqMatch ? moqMatch[1] : "",
-                    supplier: clean(supplier),
-                    location: clean(location),
+                    title:  title,
+                    price:  price,
+                    moq:    moq,
+                    supplier: supplier,
+                    location: location,
                     url:    href,
                     image:  img ? clean(img.currentSrc || img.src || img.getAttribute("data-src") || "") : ""
                 });
@@ -211,11 +220,9 @@ async def extract_products(page, page_num):
     )
 
     added = 0
-
     for c in cards:
         if c["url"] in seen_urls:
             continue
-
         seen_urls.add(c["url"])
         all_products.append({
             "Product Name": c["title"],
@@ -231,9 +238,8 @@ async def extract_products(page, page_num):
 
     print(f"  📝 Page {page_num}: extracted {len(cards)} cards ({added} new, {len(all_products)} total)")
 
-
 # ==========================================
-# 6. انتظار تحميل الصور والبطاقات (Lazy loading)
+# 6. انتظار تحميل الصور والبطاقات
 # ==========================================
 async def wait_for_cards_ready(page, timeout=20000):
     try:
@@ -245,11 +251,10 @@ async def wait_for_cards_ready(page, timeout=20000):
             timeout=timeout,
         )
     except Exception:
-        pass  # نكمل حتى لو انتهت المهلة — الأفضل جزئي من لا شيء
-
+        pass
 
 # ==========================================
-# 7. جلب روابط المنتجات الحالية (للكشف عن تغيّر الصفحة)
+# 7. جلب روابط المنتجات الحالية
 # ==========================================
 async def get_product_urls(page):
     return set(
@@ -258,12 +263,10 @@ async def get_product_urls(page):
         )
     )
 
-
 # ==========================================
-# 8. الانتقال إلى الصفحة التالية (ضغط رقم الصفحة أو زر Next)
+# 8. الانتقال إلى الصفحة التالية
 # ==========================================
 async def goto_page(page, page_num):
-    # المحاولة الأولى: الضغط على رقم الصفحة المطلوب مباشرة
     found = await page.evaluate(
         """(target) => {
             const items = [...document.querySelectorAll("div.searchx-pagination-list a")];
@@ -275,21 +278,17 @@ async def goto_page(page, page_num):
         }""",
         str(page_num),
     )
-
     if found:
         return True
 
-    # المحاولة الثانية (احتياطي): زر السهم التالي (>)
     return await page.evaluate(
         r"""() => {
             const pager = document.querySelector('div.searchx-pagination');
             if (!pager) return false;
-
             const btns = [...pager.querySelectorAll('button, a')];
             const next = btns.find(b =>
                 /next|التالي|›|»/i.test((b.getAttribute('aria-label') || '') + ' ' + b.textContent)
             );
-
             if (next && next.getAttribute('aria-disabled') !== 'true' && !next.disabled) {
                 next.click();
                 return true;
@@ -298,30 +297,24 @@ async def goto_page(page, page_num):
         }"""
     )
 
-
 # ==========================================
-# 9. انتظار تحدّث محتوى الصفحة بعد الضغط
+# 9. انتظار تحدّث محتوى الصفحة
 # ==========================================
 async def wait_for_page_change(page, prev_urls, timeout=25000):
     await page.wait_for_timeout(1500)
-
     for _ in range(timeout // 1000):
         try:
             urls = await get_product_urls(page)
             new_urls = [u for u in urls if u not in prev_urls]
-
             if new_urls:
                 return True
         except Exception:
             pass
-
         await page.wait_for_timeout(1000)
-
     return False
 
-
 # ==========================================
-# 10. المرور على جميع الصفحات بالترتيب
+# 10. المرور على جميع الصفحات
 # ==========================================
 async def scrape_all_pages(context):
     page = await context.new_page()
@@ -329,14 +322,21 @@ async def scrape_all_pages(context):
     total_pages = None
 
     try:
-        print(f"\n🔍 Loading search results: ادوات مطبخ")
+        print(f"\n🔍 Loading search results:kitchen tools")
         await page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
         await human_scroll(page)
 
         if not await handle_security_check(page):
             return
 
-        await page.wait_for_selector(PRODUCT_LINK_SELECTOR, timeout=CARD_WAIT)
+        try:
+            await page.wait_for_selector(PRODUCT_LINK_SELECTOR, timeout=CARD_WAIT)
+        except Exception as e:
+            await page.screenshot(path="error_page.png")
+            print(f"❌ Error: {e}")
+            print("📸 Screenshot saved as error_page.png — Check what the page is showing.")
+            return
+
         total_pages = await get_total_pages(page)
 
         while True:
@@ -349,7 +349,6 @@ async def scrape_all_pages(context):
             await wait_for_cards_ready(page)
             await extract_products(page, current)
 
-            # التوقف عند الوصول لآخر صفحة معروفة
             if total_pages and current >= total_pages:
                 print(f"\n🏁 Reached last page ({total_pages}). Done!")
                 break
@@ -364,7 +363,6 @@ async def scrape_all_pages(context):
                 print("\n🏁 Page content did not change — stopping.")
                 break
 
-            # تحديث العدد الكلي (نافذة أرقام الترقيم تتحرك للأمام مع التقدم)
             latest = await get_total_pages(page, quiet=True)
             if latest:
                 total_pages = max(total_pages or 1, latest)
@@ -374,13 +372,11 @@ async def scrape_all_pages(context):
 
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
-
     finally:
         await page.close()
 
-
 # ==========================================
-# 11. تصدير البيانات إلى Excel
+# 11. تصدير البيانات إلى Excel مع ضبط عرض الأعمدة
 # ==========================================
 def export_to_excel():
     if not all_products:
@@ -388,39 +384,37 @@ def export_to_excel():
         return
 
     df = pd.DataFrame(all_products)
+    # إزالة التكرار بناءً على الرابط
     df = df.drop_duplicates(subset=["Product URL"])
 
+    # ترتيب الأعمدة بشكل منطقي
+    cols = ["Product Name", "Price", "MOQ", "Supplier", "Location", "Product URL", "Image URL", "Page"]
+    df = df[cols]
+
     filename = "alibaba_kitchen_tools.xlsx"
-    df.to_excel(filename, index=False)
+    
+    # استخدام openpyxl لضبط عرض الأعمدة تلقائياً
+    try:
+        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Products')
+            worksheet = writer.sheets['Products']
+            for column in worksheet.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 60) # حد أقصى للعرض 60
+                worksheet.column_dimensions[column_letter].width = adjusted_width
+    except ImportError:
+        print("⚠️ مكتبة openpyxl غير مثبتة. سيتم الحفظ بدون ضبط عرض الأعمدة.")
+        df.to_excel(filename, index=False)
 
     print(f"\n🎉 File saved successfully: {filename}")
     print(f"📊 Total products extracted: {len(df)}")
-
-
-# ==========================================
-# (تشخيصي) حفظ عينة من بطاقات المنتجات HTML للفحص
-# ==========================================
-async def dump_sample_cards(page, n=3, filename="alibaba_sample_cards.html"):
-    html = await page.evaluate(
-        """(n) => {
-            const links = [...document.querySelectorAll("a.searchx-product-e-slider__link[href*='/product-detail/']")].slice(0, n);
-            return links.map(a => {
-                let node = a.parentElement;
-                for (let i = 0; i < 10 && node; i++) {
-                    if (node.querySelector && node.querySelector("[class*='price']")) return node.outerHTML;
-                    node = node.parentElement;
-                }
-                return a.outerHTML;
-            }).join("\n\n<!-- ===== CARD ===== -->\n\n");
-        }""",
-        n,
-    )
-
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(html)
-
-    print(f"🧪 Sample cards saved to: {filename}")
-
 
 # ==========================================
 # 12. Main Execution
@@ -430,9 +424,7 @@ async def main():
         browser, context = await launch_browser(p)
         await scrape_all_pages(context)
         await browser.close()
-
     export_to_excel()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
